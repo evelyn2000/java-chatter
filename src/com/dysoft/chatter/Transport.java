@@ -9,6 +9,5 @@ import java.nio.ByteBuffer;
  */
 public interface Transport {
 	void send(ByteBuffer data) throws IOException;
-	void onReceive(ByteBuffer data);
-	void onClose();
+	void close() throws IOException;
 }

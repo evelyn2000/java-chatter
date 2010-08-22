@@ -11,14 +11,14 @@ import java.util.TimerTask;
  * @author Sean Micklethwaite
  *         Aug 14, 2010 4:46:51 PM
  */
-public class Session extends StateMachine<Session.State> implements Transport {
+public class Session extends StateMachine<Session.State> implements TransportSession {
 
 	public Session() {
 		super(new NullState());
 	}
 
 	public void send(ByteBuffer data) throws IOException {
-		getState().send(data);
+
 	}
 
 	public void onReceive(ByteBuffer data) {
@@ -34,7 +34,7 @@ public class Session extends StateMachine<Session.State> implements Transport {
 	}
 
 
-	public interface State extends StateMachine.State, Transport {
+	public interface State extends StateMachine.State, TransportSession {
 	}
 
 
@@ -54,10 +54,6 @@ public class Session extends StateMachine<Session.State> implements Transport {
 	public class BaseState extends StateMachine<State>.BaseState implements State {
 		public BaseState(State parent) {
 			super(parent);
-		}
-
-		public void send(ByteBuffer msg) throws IOException {
-			parent.send(msg);
 		}
 
 		public void onReceive(ByteBuffer data) {
