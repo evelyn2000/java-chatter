@@ -1,13 +1,15 @@
 package com.dysoft.chatter;
 
+import org.apache.log4j.Logger;
+
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.MulticastSocket;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
-import java.util.Timer;
-import java.util.TimerTask;
+import java.util.*;
 
 /**
  * @author Sean Micklethwaite
@@ -18,11 +20,16 @@ import java.util.TimerTask;
  * party.
  */
 public class PeerManager extends Manager implements Manager.Dispatcher, TransportSession {
+	protected final static Logger LOG = Logger.getLogger(PeerManager.class);
+
 	DatagramChannel dataChannel;
 	MulticastSocket broadcaster;
 	SocketTransport dataTransport;
 	
 	Timer broadcastTimer = new Timer();
+
+	final Map<SocketAddress, PeerSession> peers = new HashMap<SocketAddress, PeerSession>();
+	final Map<Long, Party> parties = new HashMap<Long, Party>();
 
 	public PeerManager() throws IOException {
 	}
@@ -57,6 +64,8 @@ public class PeerManager extends Manager implements Manager.Dispatcher, Transpor
 					if(src != null) {
 						buf.flip();
 						System.out.println("GOT PACKET from " + src);
+						connect(new InetSocketAddress(((InetSocketAddress)src).getAddress(), 1234), PeerManager.this);
+						return;
 					}
 
 					Message msg = new Message(Message.Type.PARTY_BROADCAST);
@@ -65,7 +74,7 @@ public class PeerManager extends Manager implements Manager.Dispatcher, Transpor
 					buf.flip();
 					dataChannel.send(buf, new InetSocketAddress("255.255.255.255", 12345));
 				} catch (IOException e) {
-					e.printStackTrace();  //To change body of catch statement use File | Settings | File Templates.
+					e.printStackTrace();
 				}
 
 				startBroadcasting();
@@ -74,9 +83,21 @@ public class PeerManager extends Manager implements Manager.Dispatcher, Transpor
 	}
 
 
-
+	//// Dispatcher
 
 	public TransportSession accept(Transport channel) {
+		LOG.info("Remote: Connected to " + channel.getSocketAddress());
+		PeerSession peer = new PeerSession(this, channel);
+		peers.put(channel.getSocketAddress(), peer);
+		peer.startServer();
+		return peer;
+	}
+
+	public TransportSession onConnect(Transport channel) {
+		LOG.info("Connected to " + channel.getSocketAddress());
+		PeerSession peer = new PeerSession(this, channel);
+		peers.put(channel.getSocketAddress(), peer);
+		peer.startClient();
 		return null;
 	}
 
@@ -89,5 +110,23 @@ public class PeerManager extends Manager implements Manager.Dispatcher, Transpor
 
 	public void onClose() {
 		//To change body of implemented methods use File | Settings | File Templates.
+	}
+
+
+	public Collection<Party> getParties() {
+		return parties.values();
+	}
+
+	public Party getParty(long clientPartyID) {
+		return parties.get(clientPartyID);
+	}
+
+	public void setParty(Party party) {
+		parties.put(party.getID(), party);
+	}
+
+	public PartyCodec getPartyCodec(long partyFormatID) {
+		// TODO
+		return new PartyCodec();
 	}
 }

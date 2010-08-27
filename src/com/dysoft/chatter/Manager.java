@@ -1,7 +1,10 @@
 package com.dysoft.chatter;
 
+import org.apache.log4j.Logger;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
 import java.nio.channels.spi.SelectorProvider;
@@ -13,9 +16,12 @@ import java.util.concurrent.Callable;
  *         Aug 14, 2010 6:58:47 PM
  */
 public abstract class Manager implements Runnable {
+	protected final static Logger LOG = Logger.getLogger(Manager.class);
+
 	final Selector selector;
 	final Stack<ByteBuffer> bufferPool = new Stack<ByteBuffer>();
-	final Queue<Callable> tasks = new ArrayDeque<Callable>();
+	final Queue<Callable<Boolean>> priorityTasks = new ArrayDeque<Callable<Boolean>>();
+	final Queue<Callable<Boolean>> tasks = new ArrayDeque<Callable<Boolean>>();
 
 	Thread thread = null;
 
@@ -35,27 +41,37 @@ public abstract class Manager implements Runnable {
 		channel.socket().bind(isa);
 
 		synchronized (tasks) {
-			tasks.add(new Callable() {
-				public Object call() throws Exception {
+			priorityTasks.add(new Callable<Boolean>() {
+				public Boolean call() throws Exception {
 					channel.register(selector, SelectionKey.OP_ACCEPT, dispatcher);
-					return null;
+					return true;
 				}
 			});
 		}
 		selector.wakeup();
 	}
 
+	public SocketTransport<SocketChannel> connect(InetSocketAddress isa, final Dispatcher dispatcher) throws IOException {
+		final SocketChannel channel = SocketChannel.open(isa);
+		channel.finishConnect();
+		final SocketTransport<SocketChannel> transport = new SocketTransport<SocketChannel>(channel, isa);
+		return register(transport, dispatcher.onConnect(transport));
+	}
+
 	/**
 	 * Registers a socket for reading. Data will be sent to the passed transport session.
 	 */
-	protected <T extends SelectableChannel & ByteChannel> SocketTransport register(final T channel, final TransportSession session) throws IOException {
-		final SocketTransport transport = new SocketTransport(channel);
-		channel.configureBlocking(false);
+	protected <T extends SelectableChannel & ByteChannel> SocketTransport<T> register(final T channel, SocketAddress address, final TransportSession session) throws IOException {
+		return register(new SocketTransport<T>(channel, address), session);
+	}
+
+	protected <T extends SelectableChannel & ByteChannel> SocketTransport<T> register(final SocketTransport<T> transport, final TransportSession session) throws IOException {
+		transport.channel.configureBlocking(false);
 		synchronized (tasks) {
-			tasks.add(new Callable() {
-				public Object call() throws Exception {
-					channel.register(selector, SelectionKey.OP_READ, new SocketData(transport, session));
-					return null;
+			priorityTasks.add(new Callable<Boolean>() {
+				public Boolean call() throws Exception {
+					transport.channel.register(selector, SelectionKey.OP_READ, new SocketData(transport, session));
+					return true;
 				}
 			});
 		}
@@ -63,19 +79,33 @@ public abstract class Manager implements Runnable {
 		return transport;
 	}
 
+	private void processTasks(final Queue<Callable<Boolean>> tasks) {
+		try {
+			synchronized (tasks) {
+				while(!tasks.isEmpty()) {
+					Callable<Boolean> start = tasks.peek();
+					do {
+						Callable<Boolean> task = tasks.remove();
+						if(task.call()) {
+							break;
+						} else {
+							tasks.add(task);
+						}
+					} while(!tasks.isEmpty() && start != tasks.peek());
+					if(start == tasks.peek()) break;
+				}
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		}
+	}
+
 	public void run() {
 		do {
 			try {
-				synchronized (tasks) {
-					for(Callable task : tasks) {
-						try {
-							task.call();
-						} catch (Exception e) {
-							e.printStackTrace();
-						}
-					}
-					tasks.clear();
-				}
+				processTasks(priorityTasks);
+				processTasks(tasks);
+
 				selector.select();
 
 				Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
@@ -90,7 +120,7 @@ public abstract class Manager implements Runnable {
 						Dispatcher dispatcher = (Dispatcher) key.attachment();
 
 						final SocketChannel channel = server.accept();
-						final SocketTransport transport = new SocketTransport(channel);
+						final SocketTransport transport = new SocketTransport(channel, channel.socket().getRemoteSocketAddress());
 						channel.configureBlocking(false);
 						channel.register(selector, SelectionKey.OP_READ, new SocketData(
 								transport, dispatcher.accept(transport)));
@@ -107,6 +137,7 @@ public abstract class Manager implements Runnable {
 								key.cancel();
 								transport.onClose();
 							} else {
+								buffer.flip();
 								transport.onReceive(buffer);
 							}
 						} catch (IOException e) {
@@ -129,14 +160,17 @@ public abstract class Manager implements Runnable {
 
 	public interface Dispatcher {
 		TransportSession accept(Transport channel);
+		TransportSession onConnect(Transport channel);
 	}
 
 	class SocketTransport<T extends SelectableChannel & ByteChannel> implements Transport {
 		final T channel;
+		final SocketAddress address;
 		final Queue<ByteBuffer> sendQueue = new ArrayDeque<ByteBuffer>();
 
-		SocketTransport(T channel) {
+		SocketTransport(T channel, SocketAddress address) {
 			this.channel = channel;
+			this.address = address;
 		}
 
 		/**
@@ -147,10 +181,11 @@ public abstract class Manager implements Runnable {
 		public synchronized void send(ByteBuffer data) throws IOException {
 			sendQueue.add(data);
 			synchronized (tasks) {
-				tasks.add(new Callable() {
-					public Object call() throws Exception {
+				tasks.add(new Callable<Boolean>() {
+					public Boolean call() throws Exception {
+						if(!channel.isRegistered()) return false;
 						channel.keyFor(selector).interestOps(SelectionKey.OP_WRITE);
-						return null;
+						return true;
 					}
 				});
 			}
@@ -159,11 +194,13 @@ public abstract class Manager implements Runnable {
 
 		public void close() throws IOException {
 			synchronized (tasks) {
-				tasks.add(new Callable() {
-					public Object call() throws Exception {
-						channel.keyFor(selector).interestOps(0);
+				priorityTasks.add(new Callable<Boolean>() {
+					public Boolean call() throws Exception {
+						if(channel.isRegistered()) {
+							channel.keyFor(selector).interestOps(0);
+						}
 						channel.close();
-						return null;
+						return true;
 					}
 				});
 			}
@@ -179,6 +216,7 @@ public abstract class Manager implements Runnable {
 		protected synchronized void processWrites(SelectionKey key) throws IOException {
 			while(!sendQueue.isEmpty()) {
 				ByteBuffer buf = sendQueue.peek();
+				LOG.debug("Writing " + buf);
 				channel.write(buf);
 				if(buf.hasRemaining()) {
 					break; // Socket full
@@ -189,6 +227,10 @@ public abstract class Manager implements Runnable {
 			if(sendQueue.isEmpty()) {
 				key.interestOps(SelectionKey.OP_READ);
 			}
+		}
+
+		public SocketAddress getSocketAddress() {
+			return address;
 		}
 	}
 

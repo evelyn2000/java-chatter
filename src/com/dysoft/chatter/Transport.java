@@ -1,6 +1,7 @@
 package com.dysoft.chatter;
 
 import java.io.IOException;
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 
 /**
@@ -10,4 +11,5 @@ import java.nio.ByteBuffer;
 public interface Transport {
 	void send(ByteBuffer data) throws IOException;
 	void close() throws IOException;
+	SocketAddress getSocketAddress();
 }
